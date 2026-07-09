@@ -263,3 +263,7 @@ Frontend features:
 - API health check
 - Predicted category display
 - Raw API response preview
+
+Streamlit Web App:
+
+https://intelligent-support-ticket-router-nlp.streamlit.app
