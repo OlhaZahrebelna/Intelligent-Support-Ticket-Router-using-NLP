@@ -153,6 +153,10 @@ Intelligent-Support-Ticket-Router-using-NLP/
 │   ├── main.py
 │   └── preprocessing.py
 │
+├── frontend/
+│   ├── requirements.txt
+│   └── streamlit_app.py
+│
 ├── model/
 │   └── svm_pipeline.joblib
 │
@@ -161,6 +165,7 @@ Intelligent-Support-Ticket-Router-using-NLP/
 │   ├── 02_Preprocessing_and_Baseline.ipynb
 │   └── 03_BERT_FineTuning.ipynb
 │
+├── .python-version
 ├── requirements.txt
 ├── runtime.txt
 └── README.md
@@ -244,3 +249,17 @@ curl -X POST "https://intelligent-support-ticket-router.onrender.com/predict" \
 - The `/predict_batch` endpoint returns predictions for multiple tickets.
 - The `score` value is based on the model decision function when available.
 - On the Render Free plan, the first request after inactivity may take longer because the service can go into sleep mode.
+
+## Streamlit Demo
+
+A simple Streamlit frontend is available for testing the deployed FastAPI model.
+
+The user can enter a support ticket, send it to the FastAPI backend, and receive the predicted support category.
+
+Frontend features:
+
+- Text input for custom support tickets
+- Example support ticket templates
+- API health check
+- Predicted category display
+- Raw API response preview
