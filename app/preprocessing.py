@@ -17,6 +17,7 @@ _NLP = spacy.load(
     "en_core_web_sm",
     disable=["parser", "ner"],
 )
+nlp = _NLP
 
 NEGATION_WORDS = {
     "no",
