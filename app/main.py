@@ -9,32 +9,48 @@ from pydantic import BaseModel, Field
 
 from app.preprocessing import TextPreprocessor, nlp
 
+
+# Compatibility for joblib artifacts serialized from a notebook where
+# TextPreprocessor and nlp were defined in __main__.
 sys.modules["__main__"].TextPreprocessor = TextPreprocessor
 sys.modules["__main__"].nlp = nlp
 
+
 MODEL_PATH = os.getenv("MODEL_PATH", "model/svm_pipeline.joblib")
-REVIEW_MARGIN_THRESHOLD = float(os.getenv("REVIEW_MARGIN_THRESHOLD", "0.10"))
+REVIEW_MARGIN_THRESHOLD = float(
+    os.getenv("REVIEW_MARGIN_THRESHOLD", "0.10")
+)
 TOP_K_CLASSES = int(os.getenv("TOP_K_CLASSES", "3"))
 TOP_K_KEYWORDS = int(os.getenv("TOP_K_KEYWORDS", "8"))
+
 
 app = FastAPI(
     title="Intelligent Support Ticket Router API",
     version="2.0.0",
     description=(
-        "FastAPI service for routing support tickets with a TF-IDF + Linear SVM "
-        "pipeline and selective human review for low-margin predictions."
+        "Support-ticket routing with TF-IDF, Linear SVM, and selective "
+        "human review for low-margin predictions."
     ),
 )
 
-model = None
+model: Optional[Any] = None
 
 
 class TicketRequest(BaseModel):
-    text: str = Field(..., min_length=1)
+    text: str = Field(
+        ...,
+        min_length=1,
+        max_length=20_000,
+        examples=["I was charged twice for my monthly subscription."],
+    )
 
 
 class BatchTicketRequest(BaseModel):
-    texts: List[str] = Field(..., min_length=1)
+    texts: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+    )
 
 
 class ClassCandidate(BaseModel):
@@ -44,8 +60,8 @@ class ClassCandidate(BaseModel):
 
 class PredictionResponse(BaseModel):
     prediction: str
-    score: Optional[float] = None
-    margin: Optional[float] = None
+    score: float
+    margin: float
     review_threshold: float
     needs_review: bool
     routing_status: str
@@ -63,11 +79,11 @@ class BatchPredictionResponse(BaseModel):
 
 
 class ReviewDecisionRequest(BaseModel):
-    text: str = Field(..., min_length=1)
-    model_prediction: str
-    selected_queue: str
+    text: str = Field(..., min_length=1, max_length=20_000)
+    model_prediction: str = Field(..., min_length=1)
+    selected_queue: str = Field(..., min_length=1)
     margin: Optional[float] = None
-    reviewer_note: Optional[str] = None
+    reviewer_note: Optional[str] = Field(default=None, max_length=2_000)
 
 
 class ReviewDecisionResponse(BaseModel):
@@ -79,95 +95,130 @@ class ReviewDecisionResponse(BaseModel):
 
 
 def _get_classifier(pipeline: Any) -> Any:
+    """Return the final estimator from a fitted sklearn pipeline."""
     if hasattr(pipeline, "steps") and pipeline.steps:
         return pipeline.steps[-1][1]
     return pipeline
 
 
 def _get_vectorizer(pipeline: Any) -> Optional[Any]:
+    """Return the fitted vectorizer from a sklearn pipeline."""
     if not hasattr(pipeline, "steps"):
         return None
+
     for _, step in reversed(pipeline.steps[:-1]):
         if hasattr(step, "get_feature_names_out"):
             return step
+
     return None
 
 
-def _transform_until_vectorizer(pipeline: Any, texts: List[str]) -> Optional[Any]:
+def _transform_to_vectorizer(
+    pipeline: Any,
+    texts: List[str],
+) -> Optional[Any]:
+    """Transform texts through the vectorizer, excluding the classifier."""
     if not hasattr(pipeline, "steps"):
         return None
 
     transformed: Any = texts
-    found_vectorizer = False
 
     for _, step in pipeline.steps[:-1]:
         if not hasattr(step, "transform"):
             return None
+
         transformed = step.transform(transformed)
+
         if hasattr(step, "get_feature_names_out"):
-            found_vectorizer = True
-            break
+            return transformed
 
-    return transformed if found_vectorizer else None
-
-
-def _decision_scores(texts: List[str]) -> np.ndarray:
-    if model is None:
-        raise RuntimeError("Model is not loaded")
-    if not hasattr(model, "decision_function"):
-        raise RuntimeError("Loaded model does not expose decision_function")
-
-    scores = np.asarray(model.decision_function(texts), dtype=float)
-    if scores.ndim == 1:
-        scores = np.column_stack([-scores, scores])
-    return scores
+    return None
 
 
-def _class_labels() -> np.ndarray:
+def _get_classes() -> np.ndarray:
     if model is None:
         raise RuntimeError("Model is not loaded")
 
     classifier = _get_classifier(model)
     classes = getattr(classifier, "classes_", None)
+
     if classes is None:
         classes = getattr(model, "classes_", None)
+
     if classes is None:
-        raise RuntimeError("Could not read class labels from the loaded model")
+        raise RuntimeError("Class labels are unavailable")
+
     return np.asarray(classes, dtype=object)
 
 
-def _top_candidates(row_scores: np.ndarray, classes: np.ndarray, top_k: int) -> List[dict]:
-    top_k = max(1, min(top_k, len(classes)))
-    indices = np.argsort(row_scores)[::-1][:top_k]
-    return [
-        {"queue": str(classes[index]), "decision_score": float(row_scores[index])}
-        for index in indices
+def _get_decision_scores(texts: List[str]) -> np.ndarray:
+    if model is None:
+        raise RuntimeError("Model is not loaded")
+
+    if not hasattr(model, "decision_function"):
+        raise RuntimeError("Model does not expose decision_function")
+
+    scores = np.asarray(model.decision_function(texts), dtype=float)
+
+    if scores.ndim == 1:
+        scores = np.column_stack([-scores, scores])
+
+    return scores
+
+
+def _rank_classes(
+    row_scores: np.ndarray,
+    classes: np.ndarray,
+) -> tuple[List[dict], int]:
+    top_k = max(1, min(TOP_K_CLASSES, len(classes)))
+    ranked_indices = np.argsort(row_scores)[::-1]
+    top_indices = ranked_indices[:top_k]
+
+    candidates = [
+        {
+            "queue": str(classes[index]),
+            "decision_score": float(row_scores[index]),
+        }
+        for index in top_indices
     ]
 
+    return candidates, int(ranked_indices[0])
 
-def _prediction_margin(row_scores: np.ndarray) -> Optional[float]:
+
+def _calculate_margin(row_scores: np.ndarray) -> float:
     if row_scores.size < 2:
-        return None
+        return 0.0
+
     sorted_scores = np.sort(row_scores)
     return float(sorted_scores[-1] - sorted_scores[-2])
 
 
-def _extract_keywords(text: str, predicted_class_index: int, top_k: int) -> List[str]:
+def _extract_keywords(
+    text: str,
+    predicted_class_index: int,
+) -> List[str]:
+    """Return TF-IDF features with the largest positive SVM contribution."""
     if model is None:
         return []
 
     vectorizer = _get_vectorizer(model)
     classifier = _get_classifier(model)
+
     if vectorizer is None or not hasattr(classifier, "coef_"):
         return []
 
     try:
-        features = _transform_until_vectorizer(model, [text])
+        features = _transform_to_vectorizer(model, [text])
+
         if features is None or features.shape[0] == 0:
             return []
 
-        feature_names = np.asarray(vectorizer.get_feature_names_out(), dtype=object)
+        feature_names = np.asarray(
+            vectorizer.get_feature_names_out(),
+            dtype=object,
+        )
         coefficients = np.asarray(classifier.coef_, dtype=float)
+
         if coefficients.ndim != 2:
             return []
 
@@ -180,19 +231,28 @@ def _extract_keywords(text: str, predicted_class_index: int, top_k: int) -> List
         row = features.getrow(0) if hasattr(features, "getrow") else features[0]
         indices = np.asarray(row.indices, dtype=int)
         values = np.asarray(row.data, dtype=float)
+
         if indices.size == 0:
             return []
 
         contributions = values * class_coefficients[indices]
         positive_mask = contributions > 0
+
         indices = indices[positive_mask]
         contributions = contributions[positive_mask]
+
         if indices.size == 0:
             return []
 
-        order = np.argsort(contributions)[::-1][:top_k]
-        return [str(feature_names[indices[index]]) for index in order]
-    except Exception:
+        order = np.argsort(contributions)[::-1][:TOP_K_KEYWORDS]
+
+        return [
+            str(feature_names[indices[position]])
+            for position in order
+        ]
+
+    except (AttributeError, IndexError, TypeError, ValueError):
+        # Explanatory metadata must never break the prediction endpoint.
         return []
 
 
@@ -201,29 +261,35 @@ def _predict_one(text: str) -> dict:
         raise HTTPException(status_code=503, detail="Model is not loaded")
 
     try:
-        classes = _class_labels()
-        scores = _decision_scores([text])[0]
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}") from exc
+        classes = _get_classes()
+        row_scores = _get_decision_scores([text])[0]
+        top_classes, predicted_index = _rank_classes(row_scores, classes)
+        margin = _calculate_margin(row_scores)
+    except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Prediction failed: {exc}",
+        ) from exc
 
-    ranked_indices = np.argsort(scores)[::-1]
-    predicted_index = int(ranked_indices[0])
     prediction = str(classes[predicted_index])
-    margin = _prediction_margin(scores)
-    needs_review = margin is None or margin < REVIEW_MARGIN_THRESHOLD
+    decision_score = float(row_scores[predicted_index])
+    needs_review = margin < REVIEW_MARGIN_THRESHOLD
 
     return {
         "prediction": prediction,
-        "score": float(scores[predicted_index]),
+        # Kept for backward compatibility with the original frontend.
+        "score": decision_score,
         "margin": margin,
         "review_threshold": REVIEW_MARGIN_THRESHOLD,
         "needs_review": needs_review,
-        "routing_status": "needs_review" if needs_review else "automatic",
-        "top_classes": _top_candidates(scores, classes, TOP_K_CLASSES),
-        "keywords": _extract_keywords(text, predicted_index, TOP_K_KEYWORDS),
+        "routing_status": (
+            "needs_review" if needs_review else "automatic"
+        ),
+        "top_classes": top_classes,
+        "keywords": _extract_keywords(text, predicted_index),
         "review_message": (
-            "Low-margin prediction. A reviewer should choose the correct queue "
-            "from the suggested classes."
+            "Low-margin prediction. A reviewer should choose the correct "
+            "queue from the suggested classes."
             if needs_review
             else None
         ),
@@ -233,50 +299,59 @@ def _predict_one(text: str) -> dict:
 @app.on_event("startup")
 def load_model() -> None:
     global model
+
     if not os.path.exists(MODEL_PATH):
         raise RuntimeError(f"Model file not found: {MODEL_PATH}")
+
     model = joblib.load(MODEL_PATH)
 
 
 @app.get("/")
-def root():
+def root() -> dict:
     return {
         "status": "ok",
         "message": "Support Ticket Router API is running",
+        "api_version": app.version,
         "review_margin_threshold": REVIEW_MARGIN_THRESHOLD,
     }
 
 
 @app.get("/health")
-def health():
+def health() -> dict:
     return {
         "status": "healthy",
         "model_loaded": model is not None,
+        "api_version": app.version,
         "review_margin_threshold": REVIEW_MARGIN_THRESHOLD,
     }
 
 
 @app.post("/predict", response_model=PredictionResponse)
-def predict(payload: TicketRequest):
+def predict(payload: TicketRequest) -> dict:
     return _predict_one(payload.text.strip())
 
 
 @app.post("/predict_batch", response_model=BatchPredictionResponse)
-def predict_batch(payload: BatchTicketRequest):
+def predict_batch(payload: BatchTicketRequest) -> dict:
     results = []
+
     for text in payload.texts:
-        cleaned_text = text.strip() if isinstance(text, str) else ""
-        results.append({"text": cleaned_text, **_predict_one(cleaned_text)})
+        cleaned_text = text.strip()
+        results.append(
+            {
+                "text": cleaned_text,
+                **_predict_one(cleaned_text),
+            }
+        )
+
     return {"predictions": results}
 
 
 @app.post("/review/confirm", response_model=ReviewDecisionResponse)
-def confirm_review(payload: ReviewDecisionRequest):
+def confirm_review(payload: ReviewDecisionRequest) -> dict:
+    """Acknowledge a human decision without persisting it yet."""
     selected_queue = payload.selected_queue.strip()
     model_prediction = payload.model_prediction.strip()
-
-    if not selected_queue:
-        raise HTTPException(status_code=422, detail="selected_queue must not be empty")
 
     return {
         "status": "accepted",
@@ -284,7 +359,7 @@ def confirm_review(payload: ReviewDecisionRequest):
         "model_prediction": model_prediction,
         "was_overridden": selected_queue != model_prediction,
         "message": (
-            "Review decision accepted for this demo. "
-            "The current endpoint does not persist decisions."
+            "Review decision accepted. This P0 endpoint does not persist "
+            "review decisions yet."
         ),
     }
