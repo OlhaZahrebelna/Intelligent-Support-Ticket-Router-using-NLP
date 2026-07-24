@@ -143,7 +143,7 @@ if result:
     if needs_review:
         st.warning("⚠️ Human review required")
         st.write(
-            "The difference between the two strongest SVM scores is below "
+            "The difference between the two strongest model scores is below "
             f"the threshold `{threshold:.3f}`."
         )
     else:
@@ -155,7 +155,7 @@ if result:
         st.metric("Predicted queue", prediction)
 
     with col2:
-        st.metric("Top-2 margin", f"{margin:.4f}")
+        st.metric("Difference between top options", f"{margin:.4f}")
 
     top_classes = result.get("top_classes", [])
 
@@ -165,23 +165,22 @@ if result:
         for rank, candidate in enumerate(top_classes, start=1):
             st.write(
                 f"**{rank}. {candidate['queue']}** — "
-                f"decision score `{candidate['decision_score']:.4f}`"
+                f"model ranking score `{candidate['decision_score']:.4f}`"
             )
 
     keywords = result.get("keywords", [])
 
     if keywords:
-        st.subheader("Influential text features")
+        st.subheader("Words that influenced the result")
         st.write(" · ".join(f"`{keyword}`" for keyword in keywords))
         st.caption(
-            "TF-IDF features with the largest positive contribution to the "
-            "predicted SVM class."
+            "These words or phrases contributed most strongly to the "
+            "predicted queue."
         )
 
-    if needs_review and top_classes:
-        with st.expander("How to read the result"):
-    st.markdown(
-        """
+    with st.expander("How to read the result"):
+        st.markdown(
+            """
 The system compares the ticket with all available support queues and shows the three most suitable options.
 
 ### Predicted queue
@@ -194,7 +193,7 @@ This is the queue the system considers the best match for the ticket.
 2. The second and third queues are alternative options.
 3. Similar scores mean that the system is uncertain between several queues.
 
-The scores are internal model values. They are not percentages or probabilities. A negative value does not mean that the result is incorrect.
+The displayed scores are internal model values. They are not percentages or probabilities. A negative value does not mean that the result is incorrect.
 
 ### Automatic routing
 
@@ -204,9 +203,17 @@ If the first queue is clearly ahead of the second queue, the ticket can be route
 
 If the first and second queues have very similar scores, the system asks a person to review the ticket.
 
-The reviewer should read the ticket, compare the suggested queues, select the best queue, add an optional note, and confirm the decision.
+The reviewer should:
+
+1. Read the original ticket.
+2. Compare the suggested queues.
+3. Select the queue that best matches the request.
+4. Add an optional note.
+5. Confirm the selected queue.
 """
-    )
+        )
+
+    if needs_review and top_classes:
         st.divider()
         st.subheader("Reviewer decision")
 
@@ -214,6 +221,7 @@ The reviewer should read the ticket, compare the suggested queues, select the be
             candidate["queue"]
             for candidate in top_classes
         ]
+
         all_queues = [
             "Billing and Payments",
             "Customer Service",
@@ -226,8 +234,10 @@ The reviewer should read the ticket, compare the suggested queues, select the be
             "Service Outages and Maintenance",
             "Technical Support",
         ]
+
         review_options = model_candidates + [
-            queue for queue in all_queues
+            queue
+            for queue in all_queues
             if queue not in model_candidates
         ]
 
