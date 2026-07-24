@@ -131,6 +131,121 @@ Best mean cross-validation Macro F1:
 
 The lower `C` value applies stronger regularization than the default Linear SVM. Unigrams and bigrams allow the model to capture phrases such as `password reset`, `billing issue`, and `service outage`.
 
+## Fixed-Test Comparison: Linear SVM vs BERT
+
+The error-analysis notebook compares both models on exactly the same **4,750-record test set**. Prediction artifacts are joined by `record_id`, and the notebook validates that both files contain the same records, text, and ground-truth labels before any comparison.
+
+| Model | Accuracy | Macro F1 | Weighted F1 |
+|---|---:|---:|---:|
+| **Linear SVM** | **0.5604** | **0.5427** | **0.5616** |
+| BERT | 0.4288 | 0.4297 | 0.4293 |
+
+Linear SVM is therefore the stronger primary router in the current experiment. BERT is not assigned equal production weight; it is retained as a secondary disagreement and auditing signal.
+
+The models produce the same prediction for only **47.37%** of test records.
+
+| Outcome | Records | Share |
+|---|---:|---:|
+| Both models wrong | 1,606 | 33.81% |
+| Both models correct | 1,555 | 32.74% |
+| Only SVM correct | 1,107 | 23.31% |
+| Only BERT correct | 482 | 10.15% |
+
+The large `Both wrong` group shows that many errors are caused by task ambiguity, overlapping queue definitions, or possible label noise rather than by one specific model architecture.
+
+### Class-Level Findings
+
+Linear SVM achieves its strongest class-level performance on:
+
+| Queue | SVM F1 |
+|---|---:|
+| Billing and Payments | 0.806 |
+| Service Outages and Maintenance | 0.607 |
+| Technical Support | 0.598 |
+| Human Resources | 0.547 |
+
+The most difficult SVM classes are:
+
+| Queue | SVM F1 |
+|---|---:|
+| Sales and Pre-Sales | 0.433 |
+| General Inquiry | 0.435 |
+| IT Support | 0.472 |
+| Product Support | 0.507 |
+| Customer Service | 0.508 |
+
+The largest SVM-over-BERT F1 improvements occur for `General Inquiry`, `Technical Support`, `Customer Service`, and `Product Support`.
+
+### Dominant Error Patterns
+
+The most frequent errors are concentrated among semantically overlapping support queues. Important confusion directions include:
+
+- Technical Support → IT Support;
+- Product Support → Technical Support;
+- Technical Support → Product Support;
+- Technical Support → Customer Service;
+- Customer Service → Product Support;
+- IT Support → Technical Support.
+
+Both models are wrong on **1,606** tickets, and on **695** of those records they select the same incorrect label. Shared high-confidence mistakes are especially important label-audit candidates because model agreement does not guarantee that the dataset label is correct.
+
+Ticket length is not a strong standalone explanation of errors. Median text length ranges from 53 to 64 words across model-outcome groups, so semantic ambiguity is more important than document length alone.
+
+## Selective Agent Review Strategy
+
+The production-oriented extension uses the Linear SVM prediction margin as an uncertainty signal. A ticket is routed automatically when the SVM margin is above a selected threshold; lower-margin tickets are sent to a human or LLM-assisted review agent.
+
+The strategy is evaluated with the following metrics:
+
+- **agent review rate** — share of all tickets sent for review;
+- **automatic coverage** — share routed without review;
+- **automatic accuracy** — accuracy on automatically routed tickets;
+- **errors sent to agent** — number of SVM errors captured by review;
+- **agent-case error rate** — error concentration inside the review queue;
+- **error recall** — share of all SVM errors captured by review.
+
+| Margin threshold | Agent review rate | Automatic coverage | Automatic accuracy | Errors sent to agent | Error recall |
+|---:|---:|---:|---:|---:|---:|
+| 0.02 | 6.65% | 93.35% | 57.96% | 224 | 10.73% |
+| 0.03 | 9.87% | 90.13% | 58.75% | 322 | 15.42% |
+| 0.05 | 16.25% | 83.75% | 61.01% | 537 | 25.72% |
+| **0.10** | **29.62%** | **70.38%** | **65.69%** | **941** | **45.07%** |
+| 0.15 | 41.89% | 58.11% | 70.51% | 1,274 | 61.02% |
+| 0.20 | 51.35% | 48.65% | 75.08% | 1,512 | 72.41% |
+
+A margin threshold of **0.10** is selected as the most balanced experimental operating point:
+
+- about **70.4%** of tickets remain fully automatic;
+- about **29.6%** are escalated for review;
+- automatic-route accuracy increases from the base SVM accuracy of **56.04%** to **65.69%**;
+- the review queue captures **941 model errors**, or about **45.1%** of all SVM errors;
+- reviewed cases have an error rate of approximately **66.9%**, showing that the margin successfully concentrates difficult tickets.
+
+This threshold is an experiment-derived recommendation, not a universal production constant. In a deployed system it should be selected using business costs, agent capacity, acceptable error rates, latency requirements, and monitored data drift.
+
+### Proposed Hybrid Routing Flow
+
+```text
+Incoming ticket
+      |
+      v
+TextPreprocessor
+      |
+      v
+TF-IDF + Linear SVM
+      |
+      v
+Prediction margin
+   /       \
+high       low
+ |          |
+ v          v
+Automatic  Human or
+routing    LLM-assisted review
+```
+
+The weaker BERT model can provide an additional disagreement signal, but the notebook does not support using a simple equal-weight SVM–BERT ensemble because BERT is materially weaker on the fixed test set.
+
 ## Why Linear SVM Was Selected
 
 Linear SVM is well suited to sparse, high-dimensional TF-IDF features. In this project it:
@@ -260,7 +375,7 @@ Intelligent-Support-Ticket-Router-using-NLP/
 │   ├── 01_Description_and_EDA_ENG.ipynb
 │   ├── 02_Preprocessing_and_Baseline.ipynb
 │   ├── 03_BERT_FineTuning.ipynb
-│   └── 04_Error_Analysis.ipynb
+│   └── 04_Test_Error_Analysis and Selective Agent Review Strategy.ipynb
 ├── requirements.txt
 ├── runtime.txt
 └── README.md
@@ -295,14 +410,19 @@ Intelligent-Support-Ticket-Router-using-NLP/
 - validation and test evaluation;
 - comparison with the classical baseline.
 
-### `04_Error_Analysis.ipynb`
+### `04_Test_Error_Analysis and Selective Agent Review Strategy.ipynb`
 
-- class-level error rates;
-- confusion-pair analysis;
-- ticket-length analysis;
-- comparison of SVM and BERT predictions;
-- identification of ambiguous or potentially noisy labels;
-- confidence-based agent-review experiments.
+- validates and merges SVM and BERT artifacts by `record_id`;
+- compares both models on the same fixed 4,750-record test set;
+- calculates accuracy, Macro F1, Weighted F1, and class-level metrics;
+- separates both-correct, both-wrong, and model-specific outcomes;
+- identifies dominant confusion pairs and shared wrong predictions;
+- calculates SVM decision margins and analyzes BERT confidence;
+- reviews low-margin and high-confidence disagreement cases;
+- identifies potential label-review candidates;
+- evaluates selective agent-review thresholds;
+- recommends a 0.10 SVM-margin operating point for the experimental hybrid workflow;
+- exports reusable error-analysis tables.
 
 ## Local Setup
 
@@ -389,11 +509,12 @@ The deployment Python version is defined in `runtime.txt`.
 
 - probability calibration for more interpretable confidence scores;
 - class-specific confidence thresholds;
-- agent or LLM review for uncertain predictions;
+- implement the experimental 0.10-margin selective review workflow in the API;
+- evaluate human and LLM reviewer accuracy on escalated tickets;
+- combine margin, class-specific risk, and model disagreement in the review policy;
 - hierarchical routing for semantically overlapping queues;
 - targeted relabeling of ambiguous examples;
 - improved domain-specific preprocessing;
 - monitoring for class drift and prediction drift;
 - automated tests for preprocessing and API contracts.
-
 This repository is a portfolio project demonstrating an end-to-end NLP workflow: data preparation, model experimentation, error analysis, deployment, and production-oriented inference.
