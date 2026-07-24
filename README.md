@@ -1,24 +1,31 @@
 # Intelligent Support Ticket Router using NLP
 
-An end-to-end NLP project for automatically routing English customer-support tickets to the most appropriate support queue.
+An end-to-end NLP project for routing English customer-support tickets to one of ten support queues.
 
-The project compares classical text-classification baselines, fine-tunes a transformer model in a separate experiment, analyzes model errors, and deploys the selected production pipeline through FastAPI and Streamlit.
+The repository covers the complete workflow:
 
-## Live Applications
+- exploratory data analysis;
+- classical NLP baselines;
+- BERT fine-tuning;
+- fixed-test error analysis;
+- selective human-review strategy;
+- FastAPI inference service;
+- Streamlit review interface;
+- deployment on Render and Streamlit Community Cloud.
 
-- **FastAPI service:** https://intelligent-support-ticket-router.onrender.com
-- **Interactive API documentation:** https://intelligent-support-ticket-router.onrender.com/docs
-- **Streamlit demo:** https://intelligent-support-ticket-router-nlp.streamlit.app
+## Live Demo
 
-> The Render free instance may need additional time to start after a period of inactivity.
+- **FastAPI API:** https://intelligent-support-ticket-router.onrender.com
+- **Swagger documentation:** https://intelligent-support-ticket-router.onrender.com/docs
+- **Streamlit application:** https://intelligent-support-ticket-router-nlp.streamlit.app
+
+> The Render free instance may take additional time to start after inactivity.
 
 ## Business Problem
 
-Customer-support teams receive large volumes of incoming requests. Manual routing is slow, inconsistent, and difficult to scale.
+Customer-support requests often need to be routed manually to the correct operational team. Manual routing is time-consuming, inconsistent, and difficult to scale.
 
-This project treats ticket routing as a **10-class text-classification problem**. Given the subject and body of a support request, the model predicts the queue that should handle the ticket.
-
-The target queues are:
+This project formulates routing as a **10-class text-classification problem**. Given the text of a support ticket, the system predicts one of the following queues:
 
 1. Billing and Payments
 2. Customer Service
@@ -31,82 +38,106 @@ The target queues are:
 9. Service Outages and Maintenance
 10. Technical Support
 
+## System Overview
+
+```text
+Incoming ticket
+      |
+      v
+spaCy preprocessing
+      |
+      v
+TF-IDF vectorization
+      |
+      v
+Linear SVM classifier
+      |
+      v
+Top-2 decision margin
+   /              \
+margin >= 0.10    margin < 0.10
+      |                 |
+      v                 v
+Automatic routing   Human review
+```
+
+The deployed system uses a TF-IDF + Linear SVM pipeline as the primary router.
+
+For each ticket, the API returns:
+
+- the predicted queue;
+- the Linear SVM decision score;
+- the top three candidate queues;
+- the difference between the two strongest class scores;
+- influential TF-IDF features;
+- a `needs_review` flag.
+
+Low-margin predictions are escalated to a reviewer. The reviewer can accept the predicted queue or select another suggested queue.
+
 ## Dataset
 
-The cleaned dataset used in the classical-baseline notebook contains:
+The cleaned English dataset used in the classical-model workflow contains:
 
-- **23,748 records**
-- **23,748 unique record IDs**
-- **23,748 unique combined ticket texts**
-- **10 target queues**
-- English-language tickets only
+| Property | Value |
+|---|---:|
+| Records | 23,748 |
+| Unique record IDs | 23,748 |
+| Unique combined ticket texts | 23,748 |
+| Target classes | 10 |
 
-The model input is the combined ticket text, while `queue` is the target variable.
+The data is divided with stratified sampling:
 
-The data is divided using stratified sampling:
-
-| Split | Records | Approximate share |
+| Split | Records | Share |
 |---|---:|---:|
 | Training | 15,198 | 64% |
 | Validation | 3,800 | 16% |
 | Test | 4,750 | 20% |
 | **Total** | **23,748** | **100%** |
 
-The test set remains untouched during initial model comparison and hyperparameter selection.
+The final error analysis compares models on the same fixed 4,750-record test set.
 
 ## Text Preprocessing
 
-Classical models use a custom scikit-learn-compatible `TextPreprocessor`.
-
-The transformer:
-
-- handles missing and non-string values;
-- normalizes apostrophes and common English contractions;
-- converts negative contractions such as `isn't` and `can't` into a stable negation form;
-- preserves meaningful negations such as `no`, `not`, and `never`;
-- removes URLs and email addresses;
-- normalizes whitespace;
-- tokenizes and lemmatizes text with spaCy;
-- removes stop words except preserved negations;
-- removes numeric, punctuation, and non-alphabetic tokens;
-- removes very short tokens;
-- processes texts in batches with `nlp.pipe()`.
-
-Example:
-
-```text
-Original:  I can't log into my profile.
-Processed: not log profile
-```
-
-The implementation used by the deployed pipeline is located in:
+The deployed pipeline uses a custom scikit-learn-compatible `TextPreprocessor` defined in:
 
 ```text
 app/preprocessing.py
 ```
 
-Keeping preprocessing inside the scikit-learn pipeline prevents leakage and ensures that the same transformations are applied during training and inference.
+Current preprocessing steps:
 
-## Classical Baseline Experiments
+1. Convert non-string values to empty strings.
+2. Convert text to lowercase.
+3. Remove URLs.
+4. Remove email addresses.
+5. Remove HTML tags.
+6. Normalize whitespace.
+7. Tokenize and lemmatize with `en_core_web_sm`.
+8. Keep alphabetic tokens only.
+9. Remove spaCy stop words and number-like tokens.
+10. Remove lemmas shorter than two characters.
 
-The main evaluation metric is **Macro F1**, because the target classes are imbalanced and each queue should contribute equally to the final score.
+The class inherits from `BaseEstimator` and `TransformerMixin`, allowing it to be included directly in the serialized scikit-learn pipeline.
 
-### Validation Results
+The module also exposes the global spaCy object `nlp`. This is retained for compatibility with the current `joblib` artifact.
 
-| Model | Train Macro F1 | Validation Macro F1 | Notes |
-|---|---:|---:|---|
-| Logistic Regression | 0.435 | 0.345 | Basic TF-IDF baseline |
-| Tuned Logistic Regression | 0.432 | 0.318 | Balanced weights increased minority recall but reduced precision |
-| Linear SVM | 0.704 | 0.436 | Strongest initial baseline, but with a large generalization gap |
-| Cross-validated Linear SVM | — | **0.480 mean CV** | Selected through stratified 3-fold cross-validation |
+## Classical Baselines
 
-The tuned Logistic Regression did not outperform the default configuration. Linear SVM produced the strongest classical-model performance and was therefore selected for systematic hyperparameter tuning.
+The primary evaluation metric is **Macro F1**, because the classes are imbalanced and each support queue should contribute equally to model evaluation.
 
-## Selected Linear SVM Configuration
+### Initial validation results
 
-Grid search evaluates 24 parameter combinations with stratified 3-fold cross-validation, for a total of 72 fits.
+| Model | Train Macro F1 | Validation Macro F1 |
+|---|---:|---:|
+| Logistic Regression | 0.435 | 0.345 |
+| Tuned Logistic Regression | 0.432 | 0.318 |
+| Linear SVM | 0.704 | 0.436 |
 
-The selected configuration is:
+Linear SVM achieved the strongest validation performance among the classical baselines.
+
+### Selected configuration
+
+The final classical search evaluated 24 parameter combinations with stratified 3-fold cross-validation.
 
 ```python
 TfidfVectorizer(
@@ -129,20 +160,25 @@ Best mean cross-validation Macro F1:
 0.4801
 ```
 
-The lower `C` value applies stronger regularization than the default Linear SVM. Unigrams and bigrams allow the model to capture phrases such as `password reset`, `billing issue`, and `service outage`.
+## Linear SVM vs BERT
 
-## Fixed-Test Comparison: Linear SVM vs BERT
-
-The error-analysis notebook compares both models on exactly the same **4,750-record test set**. Prediction artifacts are joined by `record_id`, and the notebook validates that both files contain the same records, text, and ground-truth labels before any comparison.
+Both models were evaluated on the same fixed test set.
 
 | Model | Accuracy | Macro F1 | Weighted F1 |
 |---|---:|---:|---:|
 | **Linear SVM** | **0.5604** | **0.5427** | **0.5616** |
 | BERT | 0.4288 | 0.4297 | 0.4293 |
 
-Linear SVM is therefore the stronger primary router in the current experiment. BERT is not assigned equal production weight; it is retained as a secondary disagreement and auditing signal.
+Linear SVM was selected for deployment because it:
 
-The models produce the same prediction for only **47.37%** of test records.
+- achieved better fixed-test performance;
+- requires less memory;
+- runs efficiently on CPU;
+- has lower inference latency;
+- is simpler to deploy and maintain;
+- supports direct feature-level explanations.
+
+### Model agreement analysis
 
 | Outcome | Records | Share |
 |---|---:|---:|
@@ -151,22 +187,29 @@ The models produce the same prediction for only **47.37%** of test records.
 | Only SVM correct | 1,107 | 23.31% |
 | Only BERT correct | 482 | 10.15% |
 
-The large `Both wrong` group shows that many errors are caused by task ambiguity, overlapping queue definitions, or possible label noise rather than by one specific model architecture.
+The models produced the same prediction for 47.37% of test examples.
 
-### Class-Level Findings
+The large group where both models failed suggests that model architecture alone does not explain all errors. Important contributing factors include:
 
-Linear SVM achieves its strongest class-level performance on:
+- semantically overlapping queue definitions;
+- ambiguous ticket wording;
+- class imbalance;
+- potentially noisy labels.
 
-| Queue | SVM F1 |
+## Class-Level Results
+
+Strongest Linear SVM classes:
+
+| Queue | F1 |
 |---|---:|
 | Billing and Payments | 0.806 |
 | Service Outages and Maintenance | 0.607 |
 | Technical Support | 0.598 |
 | Human Resources | 0.547 |
 
-The most difficult SVM classes are:
+Most difficult classes:
 
-| Queue | SVM F1 |
+| Queue | F1 |
 |---|---:|
 | Sales and Pre-Sales | 0.433 |
 | General Inquiry | 0.435 |
@@ -174,11 +217,7 @@ The most difficult SVM classes are:
 | Product Support | 0.507 |
 | Customer Service | 0.508 |
 
-The largest SVM-over-BERT F1 improvements occur for `General Inquiry`, `Technical Support`, `Customer Service`, and `Product Support`.
-
-### Dominant Error Patterns
-
-The most frequent errors are concentrated among semantically overlapping support queues. Important confusion directions include:
+Frequent confusion patterns include:
 
 - Technical Support → IT Support;
 - Product Support → Technical Support;
@@ -187,124 +226,98 @@ The most frequent errors are concentrated among semantically overlapping support
 - Customer Service → Product Support;
 - IT Support → Technical Support.
 
-Both models are wrong on **1,606** tickets, and on **695** of those records they select the same incorrect label. Shared high-confidence mistakes are especially important label-audit candidates because model agreement does not guarantee that the dataset label is correct.
+## Selective Human Review
 
-Ticket length is not a strong standalone explanation of errors. Median text length ranges from 53 to 64 words across model-outcome groups, so semantic ambiguity is more important than document length alone.
-
-## Selective Agent Review Strategy
-
-The production-oriented extension uses the Linear SVM prediction margin as an uncertainty signal. A ticket is routed automatically when the SVM margin is above a selected threshold; lower-margin tickets are sent to a human or LLM-assisted review agent.
-
-The strategy is evaluated with the following metrics:
-
-- **agent review rate** — share of all tickets sent for review;
-- **automatic coverage** — share routed without review;
-- **automatic accuracy** — accuracy on automatically routed tickets;
-- **errors sent to agent** — number of SVM errors captured by review;
-- **agent-case error rate** — error concentration inside the review queue;
-- **error recall** — share of all SVM errors captured by review.
-
-| Margin threshold | Agent review rate | Automatic coverage | Automatic accuracy | Errors sent to agent | Error recall |
-|---:|---:|---:|---:|---:|---:|
-| 0.02 | 6.65% | 93.35% | 57.96% | 224 | 10.73% |
-| 0.03 | 9.87% | 90.13% | 58.75% | 322 | 15.42% |
-| 0.05 | 16.25% | 83.75% | 61.01% | 537 | 25.72% |
-| **0.10** | **29.62%** | **70.38%** | **65.69%** | **941** | **45.07%** |
-| 0.15 | 41.89% | 58.11% | 70.51% | 1,274 | 61.02% |
-| 0.20 | 51.35% | 48.65% | 75.08% | 1,512 | 72.41% |
-
-A margin threshold of **0.10** is selected as the most balanced experimental operating point:
-
-- about **70.4%** of tickets remain fully automatic;
-- about **29.6%** are escalated for review;
-- automatic-route accuracy increases from the base SVM accuracy of **56.04%** to **65.69%**;
-- the review queue captures **941 model errors**, or about **45.1%** of all SVM errors;
-- reviewed cases have an error rate of approximately **66.9%**, showing that the margin successfully concentrates difficult tickets.
-
-This threshold is an experiment-derived recommendation, not a universal production constant. In a deployed system it should be selected using business costs, agent capacity, acceptable error rates, latency requirements, and monitored data drift.
-
-### Proposed Hybrid Routing Flow
+The deployed API uses the difference between the two highest Linear SVM decision scores:
 
 ```text
-Incoming ticket
-      |
-      v
-TextPreprocessor
-      |
-      v
-TF-IDF + Linear SVM
-      |
-      v
-Prediction margin
-   /       \
-high       low
- |          |
- v          v
-Automatic  Human or
-routing    LLM-assisted review
+margin = highest score - second-highest score
 ```
 
-The weaker BERT model can provide an additional disagreement signal, but the notebook does not support using a simple equal-weight SVM–BERT ensemble because BERT is materially weaker on the fixed test set.
+A smaller margin means the classifier is less able to separate its two strongest candidate queues.
 
-## Why Linear SVM Was Selected
-
-Linear SVM is well suited to sparse, high-dimensional TF-IDF features. In this project it:
-
-- clearly outperformed both Logistic Regression baselines;
-- produced better F1 scores for several minority queues;
-- was considerably lighter and faster than a transformer model;
-- supported low-latency CPU inference;
-- was straightforward to package in a single scikit-learn pipeline.
-
-The project also evaluates BERT separately. The production choice should be understood as an engineering trade-off between predictive quality, inference cost, latency, memory requirements, and deployment complexity.
-
-## Known Challenges
-
-The task remains difficult because several queues are semantically close. Commonly overlapping categories include:
-
-- Technical Support vs IT Support;
-- Technical Support vs Product Support;
-- Customer Service vs Technical Support;
-- General Inquiry vs Sales and Pre-Sales.
-
-Class imbalance also makes minority categories more difficult to learn. A high training score with a substantially lower validation score indicates that regularization alone cannot completely resolve semantic overlap or possible label noise.
-
-## Model Artifact
-
-The deployed scikit-learn pipeline is stored as:
+The default review threshold is:
 
 ```text
-model/svm_pipeline.joblib
+0.10
 ```
 
-The serialized artifact contains:
+This can be configured through:
 
-1. `TextPreprocessor`
-2. `TfidfVectorizer`
-3. `LinearSVC`
+```text
+REVIEW_MARGIN_THRESHOLD
+```
 
-Because the preprocessing class is referenced by the serialized pipeline, its module path and class name must remain stable.
+### Threshold experiment
 
-> After changing `app/preprocessing.py`, retrain and export the complete pipeline. Replacing only the Python preprocessing file can create a mismatch between inference-time text and the TF-IDF vocabulary learned during training.
+| Threshold | Review rate | Automatic coverage | Automatic accuracy | SVM errors sent to review |
+|---:|---:|---:|---:|---:|
+| 0.02 | 6.65% | 93.35% | 57.96% | 224 |
+| 0.03 | 9.87% | 90.13% | 58.75% | 322 |
+| 0.05 | 16.25% | 83.75% | 61.01% | 537 |
+| **0.10** | **29.62%** | **70.38%** | **65.69%** | **941** |
+| 0.15 | 41.89% | 58.11% | 70.51% | 1,274 |
+| 0.20 | 51.35% | 48.65% | 75.08% | 1,512 |
+
+At threshold `0.10`:
+
+- 70.38% of tickets remain automatically routed;
+- 29.62% are marked for review;
+- automatic-route accuracy is 65.69%;
+- 941 SVM errors are concentrated in the review queue.
+
+This does **not** prove that a human or automated reviewer will correct every escalated prediction. It shows that the margin is useful for separating easier automatic cases from harder review cases.
+
+## Explainability
+
+For each prediction, the API can return influential text features.
+
+For a Linear SVM class, the contribution of a TF-IDF feature is approximated as:
+
+```text
+feature contribution = TF-IDF value × class coefficient
+```
+
+Only features with a positive contribution to the selected class are returned.
+
+This provides a lightweight explanation of which words or phrases supported the routing decision.
 
 ## API
 
-### Health Check
+### Root
+
+```http
+GET /
+```
+
+Example:
+
+```json
+{
+  "status": "ok",
+  "message": "Support Ticket Router API is running",
+  "api_version": "2.0.0",
+  "review_margin_threshold": 0.1
+}
+```
+
+### Health check
 
 ```http
 GET /health
 ```
 
-Example response:
+Example:
 
 ```json
 {
   "status": "healthy",
-  "model_loaded": true
+  "model_loaded": true,
+  "review_margin_threshold": 0.1
 }
 ```
 
-### Single Prediction
+### Single prediction
 
 ```http
 POST /predict
@@ -318,18 +331,41 @@ Request:
 }
 ```
 
-Example response:
+Response structure:
 
 ```json
 {
   "prediction": "Billing and Payments",
-  "score": 0.84
+  "score": 1.42,
+  "margin": 0.36,
+  "review_threshold": 0.1,
+  "needs_review": false,
+  "routing_status": "automatic",
+  "top_classes": [
+    {
+      "queue": "Billing and Payments",
+      "decision_score": 1.42
+    },
+    {
+      "queue": "Customer Service",
+      "decision_score": 1.06
+    },
+    {
+      "queue": "General Inquiry",
+      "decision_score": 0.41
+    }
+  ],
+  "keywords": [
+    "charged",
+    "subscription"
+  ],
+  "review_message": null
 }
 ```
 
-The score is derived from the classifier decision function and should be interpreted as a relative model confidence signal, not as a calibrated probability.
+`score` is a Linear SVM decision score. It is not a calibrated probability.
 
-### Batch Prediction
+### Batch prediction
 
 ```http
 POST /predict_batch
@@ -340,30 +376,66 @@ Request:
 ```json
 {
   "texts": [
-    "I was charged twice for my monthly subscription.",
-    "I cannot log in to my employee account.",
+    "I was charged twice for my subscription.",
+    "I cannot access the corporate VPN.",
     "The application crashes after the latest update."
   ]
 }
 ```
 
-The endpoint returns one queue prediction for each submitted text.
+The endpoint returns the full prediction structure for each ticket.
 
-## Example cURL Request
+### Confirm review decision
 
-```bash
-curl -X POST \
-  "https://intelligent-support-ticket-router.onrender.com/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"text":"I was charged twice for my monthly subscription."}'
+```http
+POST /review/confirm
 ```
+
+Request:
+
+```json
+{
+  "text": "I cannot access the corporate VPN.",
+  "model_prediction": "Technical Support",
+  "selected_queue": "IT Support",
+  "margin": 0.06,
+  "reviewer_note": "The issue concerns internal infrastructure."
+}
+```
+
+Example response:
+
+```json
+{
+  "status": "accepted",
+  "selected_queue": "IT Support",
+  "model_prediction": "Technical Support",
+  "was_overridden": true,
+  "message": "Review decision accepted for this demo. The current endpoint does not persist decisions."
+}
+```
+
+The current endpoint acknowledges the review decision but does not store it in a database.
+
+## Streamlit Interface
+
+The frontend allows a user to:
+
+- enter or select a sample ticket;
+- call the FastAPI prediction endpoint;
+- see the predicted queue and margin;
+- inspect top candidate queues;
+- inspect influential TF-IDF features;
+- identify whether review is required;
+- select a final queue for low-margin cases;
+- submit the review decision to the API;
+- inspect the raw JSON response.
 
 ## Project Structure
 
 ```text
 Intelligent-Support-Ticket-Router-using-NLP/
 ├── app/
-│   ├── __init__.py
 │   ├── main.py
 │   └── preprocessing.py
 ├── frontend/
@@ -376,6 +448,7 @@ Intelligent-Support-Ticket-Router-using-NLP/
 │   ├── 02_Preprocessing_and_Baseline.ipynb
 │   ├── 03_BERT_FineTuning.ipynb
 │   └── 04_Test_Error_Analysis and Selective Agent Review Strategy.ipynb
+├── .python-version
 ├── requirements.txt
 ├── runtime.txt
 └── README.md
@@ -383,46 +456,49 @@ Intelligent-Support-Ticket-Router-using-NLP/
 
 ## Notebook Workflow
 
-### `01_Description_and_EDA_ENG.ipynb`
+### 1. Description and EDA
 
-- dataset validation;
-- class distribution analysis;
-- ticket-length analysis;
-- duplicate and missing-value checks;
-- preparation of the cleaned English dataset.
+`01_Description_and_EDA_ENG.ipynb`
 
-### `02_Preprocessing_and_Baseline.ipynb`
+- validates the source dataset;
+- analyzes missing values and duplicates;
+- examines class distribution;
+- examines ticket length;
+- prepares the cleaned English dataset.
 
-- stratified train-validation-test split;
-- reusable spaCy preprocessing transformer;
-- Logistic Regression baselines;
-- Linear SVM baseline;
-- Macro F1-based model comparison;
-- stratified cross-validation;
-- TF-IDF and SVM hyperparameter search;
-- final classical pipeline export.
+### 2. Preprocessing and baselines
 
-### `03_BERT_FineTuning.ipynb`
+`02_Preprocessing_and_Baseline.ipynb`
 
-- BERT tokenization;
-- fine-tuning for 10-class classification;
-- class-weighted training;
-- validation and test evaluation;
-- comparison with the classical baseline.
+- creates stratified train, validation, and test splits;
+- evaluates Logistic Regression;
+- evaluates Linear SVM;
+- performs cross-validation;
+- tunes TF-IDF and Linear SVM parameters;
+- exports the selected scikit-learn pipeline.
 
-### `04_Test_Error_Analysis and Selective Agent Review Strategy.ipynb`
+### 3. BERT fine-tuning
 
-- validates and merges SVM and BERT artifacts by `record_id`;
-- compares both models on the same fixed 4,750-record test set;
-- calculates accuracy, Macro F1, Weighted F1, and class-level metrics;
-- separates both-correct, both-wrong, and model-specific outcomes;
-- identifies dominant confusion pairs and shared wrong predictions;
-- calculates SVM decision margins and analyzes BERT confidence;
-- reviews low-margin and high-confidence disagreement cases;
-- identifies potential label-review candidates;
-- evaluates selective agent-review thresholds;
-- recommends a 0.10 SVM-margin operating point for the experimental hybrid workflow;
-- exports reusable error-analysis tables.
+`03_BERT_FineTuning.ipynb`
+
+- tokenizes ticket text;
+- fine-tunes BERT for 10-class classification;
+- uses class-weighted training;
+- evaluates validation and test performance;
+- exports prediction artifacts for comparison.
+
+### 4. Error analysis and review strategy
+
+`04_Test_Error_Analysis and Selective Agent Review Strategy.ipynb`
+
+- validates and joins SVM and BERT predictions by `record_id`;
+- compares both models on the same test records;
+- analyzes class-level errors;
+- identifies dominant confusion pairs;
+- examines model agreement and disagreement;
+- calculates SVM margins;
+- evaluates selective-review thresholds;
+- identifies possible label-audit candidates.
 
 ## Local Setup
 
@@ -433,46 +509,91 @@ git clone https://github.com/OlhaZahrebelna/Intelligent-Support-Ticket-Router-us
 cd Intelligent-Support-Ticket-Router-using-NLP
 ```
 
-Create and activate a virtual environment:
+Create a virtual environment:
 
 ```bash
 python -m venv .venv
 ```
 
-macOS or Linux:
+Activate it on macOS or Linux:
 
 ```bash
 source .venv/bin/activate
 ```
 
-Windows PowerShell:
+Activate it on Windows PowerShell:
 
 ```powershell
 .venv\Scripts\Activate.ps1
 ```
 
-Install dependencies and the spaCy English model:
+Install backend dependencies:
 
 ```bash
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
-Run FastAPI locally:
+Run FastAPI:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Open the API documentation:
+Open:
 
 ```text
 http://127.0.0.1:8000/docs
 ```
 
+## Run the Frontend Locally
+
+Install frontend dependencies:
+
+```bash
+pip install -r frontend/requirements.txt
+```
+
+Set the backend URL if necessary:
+
+```bash
+export API_BASE_URL=http://127.0.0.1:8000
+```
+
+Windows PowerShell:
+
+```powershell
+$env:API_BASE_URL="http://127.0.0.1:8000"
+```
+
+Run Streamlit:
+
+```bash
+streamlit run frontend/streamlit_app.py
+```
+
+## Configuration
+
+Backend environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `MODEL_PATH` | `model/svm_pipeline.joblib` | Path to the serialized pipeline |
+| `REVIEW_MARGIN_THRESHOLD` | `0.10` | Margin below which review is required |
+| `TOP_K_CLASSES` | `3` | Number of suggested queues returned |
+| `TOP_K_KEYWORDS` | `8` | Maximum number of influential features |
+
+Frontend environment variable:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `API_BASE_URL` | Render API URL | Backend used by Streamlit |
+
 ## Deployment
 
-The API is deployed as a Render Web Service.
+### Backend
+
+The FastAPI service is deployed on Render.
 
 Build command:
 
@@ -486,11 +607,29 @@ Start command:
 uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-The deployment Python version is defined in `runtime.txt`.
+Python version:
 
-## Tech Stack
+```text
+3.11.9
+```
 
-- Python
+### Frontend
+
+The Streamlit application is deployed separately using:
+
+```text
+frontend/streamlit_app.py
+```
+
+with dependencies from:
+
+```text
+frontend/requirements.txt
+```
+
+## Technology Stack
+
+- Python 3.11
 - pandas
 - NumPy
 - scikit-learn
@@ -501,20 +640,19 @@ The deployment Python version is defined in `runtime.txt`.
 - Pydantic
 - Uvicorn
 - Streamlit
-- Docker
 - joblib
 - Render
 
-## Future Improvements
+## Current Limitations
 
-- probability calibration for more interpretable confidence scores;
-- class-specific confidence thresholds;
-- implement the experimental 0.10-margin selective review workflow in the API;
-- evaluate human and LLM reviewer accuracy on escalated tickets;
-- combine margin, class-specific risk, and model disagreement in the review policy;
-- hierarchical routing for semantically overlapping queues;
-- targeted relabeling of ambiguous examples;
-- improved domain-specific preprocessing;
-- monitoring for class drift and prediction drift;
-- automated tests for preprocessing and API contracts.
-This repository is a portfolio project demonstrating an end-to-end NLP workflow: data preparation, model experimentation, error analysis, deployment, and production-oriented inference.
+- Several target classes have substantial semantic overlap.
+- The dataset may contain ambiguous or noisy labels.
+- Linear SVM decision scores are not calibrated probabilities.
+- The selective-review threshold was derived experimentally and should be monitored after deployment.
+- Review decisions are acknowledged but not persisted.
+- The reviewer can choose only from the classes presented by the current frontend.
+- The current API does not implement authentication, durable logging, or a retraining feedback loop.
+- The serialized model depends on the current preprocessing class and spaCy compatibility objects.
+
+
+This project demonstrates an end-to-end NLP workflow from exploratory analysis and model comparison to deployment, explainability, and human-in-the-loop routing.
