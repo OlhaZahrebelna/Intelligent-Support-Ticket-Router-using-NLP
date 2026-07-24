@@ -1,75 +1,178 @@
 # Intelligent Support Ticket Router using NLP
 
-An NLP-powered support ticket classification service that predicts the most likely support category for a customer message.
+An end-to-end NLP project for automatically routing English customer-support tickets to the most appropriate support queue.
 
-The project uses a traditional machine learning pipeline with text preprocessing, TF-IDF features, and a Linear SVM classifier. The trained model is served through a FastAPI API and deployed on Render.
+The project compares classical text-classification baselines, fine-tunes a transformer model in a separate experiment, analyzes model errors, and deploys the selected production pipeline through FastAPI and Streamlit.
 
-## Live Demo
+## Live Applications
 
-FastAPI service:
+- **FastAPI service:** https://intelligent-support-ticket-router.onrender.com
+- **Interactive API documentation:** https://intelligent-support-ticket-router.onrender.com/docs
+- **Streamlit demo:** https://intelligent-support-ticket-router-nlp.streamlit.app
 
-https://intelligent-support-ticket-router.onrender.com
+> The Render free instance may need additional time to start after a period of inactivity.
 
-Interactive API documentation:
+## Business Problem
 
-https://intelligent-support-ticket-router.onrender.com/docs
+Customer-support teams receive large volumes of incoming requests. Manual routing is slow, inconsistent, and difficult to scale.
 
-Prediction endpoint:
+This project treats ticket routing as a **10-class text-classification problem**. Given the subject and body of a support request, the model predicts the queue that should handle the ticket.
 
-https://intelligent-support-ticket-router.onrender.com/docs#/default/predict_predict_post
+The target queues are:
 
-## Project Overview
+1. Billing and Payments
+2. Customer Service
+3. General Inquiry
+4. Human Resources
+5. IT Support
+6. Product Support
+7. Returns and Exchanges
+8. Sales and Pre-Sales
+9. Service Outages and Maintenance
+10. Technical Support
 
-Customer support teams often receive a high volume of incoming tickets. Manually routing each ticket to the correct department can be slow, inefficient, and inconsistent.
+## Dataset
 
-This project automates support ticket routing. The model analyzes the text of a customer message and predicts the most relevant support category. The API can be used by other applications, dashboards, or frontend interfaces.
+The cleaned dataset used in the classical-baseline notebook contains:
 
-## Tech Stack
+- **23,748 records**
+- **23,748 unique record IDs**
+- **23,748 unique combined ticket texts**
+- **10 target queues**
+- English-language tickets only
 
-- Python 3.11.9
-- FastAPI
-- Uvicorn
-- scikit-learn
-- spaCy
-- pandas
-- joblib
-- Pydantic
-- Render
+The model input is the combined ticket text, while `queue` is the target variable.
 
-The Python version for deployment is defined in `runtime.txt`.
+The data is divided using stratified sampling:
 
-The main dependencies are listed in `requirements.txt`.
+| Split | Records | Approximate share |
+|---|---:|---:|
+| Training | 15,198 | 64% |
+| Validation | 3,800 | 16% |
+| Test | 4,750 | 20% |
+| **Total** | **23,748** | **100%** |
 
-## Model
+The test set remains untouched during initial model comparison and hyperparameter selection.
 
-The API serves a saved `joblib` model:
+## Text Preprocessing
+
+Classical models use a custom scikit-learn-compatible `TextPreprocessor`.
+
+The transformer:
+
+- handles missing and non-string values;
+- normalizes apostrophes and common English contractions;
+- converts negative contractions such as `isn't` and `can't` into a stable negation form;
+- preserves meaningful negations such as `no`, `not`, and `never`;
+- removes URLs and email addresses;
+- normalizes whitespace;
+- tokenizes and lemmatizes text with spaCy;
+- removes stop words except preserved negations;
+- removes numeric, punctuation, and non-alphabetic tokens;
+- removes very short tokens;
+- processes texts in batches with `nlp.pipe()`.
+
+Example:
 
 ```text
-model/svm_pipeline.joblib
+Original:  I can't log into my profile.
+Processed: not log profile
 ```
 
-The machine learning pipeline includes:
-
-- Text preprocessing
-- Lemmatization with spaCy
-- Stopword removal
-- Removal of non-alphabetic tokens
-- TF-IDF vectorization
-- Linear SVM classification
-
-The text preprocessing logic is implemented in:
+The implementation used by the deployed pipeline is located in:
 
 ```text
 app/preprocessing.py
 ```
 
-The FastAPI application loads the model on startup from:
+Keeping preprocessing inside the scikit-learn pipeline prevents leakage and ensures that the same transformations are applied during training and inference.
+
+## Classical Baseline Experiments
+
+The main evaluation metric is **Macro F1**, because the target classes are imbalanced and each queue should contribute equally to the final score.
+
+### Validation Results
+
+| Model | Train Macro F1 | Validation Macro F1 | Notes |
+|---|---:|---:|---|
+| Logistic Regression | 0.435 | 0.345 | Basic TF-IDF baseline |
+| Tuned Logistic Regression | 0.432 | 0.318 | Balanced weights increased minority recall but reduced precision |
+| Linear SVM | 0.704 | 0.436 | Strongest initial baseline, but with a large generalization gap |
+| Cross-validated Linear SVM | — | **0.480 mean CV** | Selected through stratified 3-fold cross-validation |
+
+The tuned Logistic Regression did not outperform the default configuration. Linear SVM produced the strongest classical-model performance and was therefore selected for systematic hyperparameter tuning.
+
+## Selected Linear SVM Configuration
+
+Grid search evaluates 24 parameter combinations with stratified 3-fold cross-validation, for a total of 72 fits.
+
+The selected configuration is:
+
+```python
+TfidfVectorizer(
+    ngram_range=(1, 2),
+    min_df=5,
+    max_df=0.95,
+    max_features=30_000,
+    sublinear_tf=True,
+)
+
+LinearSVC(
+    C=0.2,
+    class_weight="balanced",
+)
+```
+
+Best mean cross-validation Macro F1:
+
+```text
+0.4801
+```
+
+The lower `C` value applies stronger regularization than the default Linear SVM. Unigrams and bigrams allow the model to capture phrases such as `password reset`, `billing issue`, and `service outage`.
+
+## Why Linear SVM Was Selected
+
+Linear SVM is well suited to sparse, high-dimensional TF-IDF features. In this project it:
+
+- clearly outperformed both Logistic Regression baselines;
+- produced better F1 scores for several minority queues;
+- was considerably lighter and faster than a transformer model;
+- supported low-latency CPU inference;
+- was straightforward to package in a single scikit-learn pipeline.
+
+The project also evaluates BERT separately. The production choice should be understood as an engineering trade-off between predictive quality, inference cost, latency, memory requirements, and deployment complexity.
+
+## Known Challenges
+
+The task remains difficult because several queues are semantically close. Commonly overlapping categories include:
+
+- Technical Support vs IT Support;
+- Technical Support vs Product Support;
+- Customer Service vs Technical Support;
+- General Inquiry vs Sales and Pre-Sales.
+
+Class imbalance also makes minority categories more difficult to learn. A high training score with a substantially lower validation score indicates that regularization alone cannot completely resolve semantic overlap or possible label noise.
+
+## Model Artifact
+
+The deployed scikit-learn pipeline is stored as:
 
 ```text
 model/svm_pipeline.joblib
 ```
 
-## API Endpoints
+The serialized artifact contains:
+
+1. `TextPreprocessor`
+2. `TfidfVectorizer`
+3. `LinearSVC`
+
+Because the preprocessing class is referenced by the serialized pipeline, its module path and class name must remain stable.
+
+> After changing `app/preprocessing.py`, retrain and export the complete pipeline. Replacing only the Python preprocessing file can create a mismatch between inference-time text and the TF-IDF vocabulary learned during training.
+
+## API
 
 ### Health Check
 
@@ -92,7 +195,7 @@ Example response:
 POST /predict
 ```
 
-Request body:
+Request:
 
 ```json
 {
@@ -104,12 +207,12 @@ Example response:
 
 ```json
 {
-  "prediction": "billing",
+  "prediction": "Billing and Payments",
   "score": 0.84
 }
 ```
 
-The exact prediction label and score may vary depending on the trained model.
+The score is derived from the classifier decision function and should be interpreted as a relative model confidence signal, not as a calibrated probability.
 
 ### Batch Prediction
 
@@ -117,59 +220,89 @@ The exact prediction label and score may vary depending on the trained model.
 POST /predict_batch
 ```
 
-Request body:
+Request:
 
 ```json
 {
   "texts": [
     "I was charged twice for my monthly subscription.",
-    "I cannot login to my account.",
-    "The app crashes when I open it."
+    "I cannot log in to my employee account.",
+    "The application crashes after the latest update."
   ]
 }
 ```
 
-Example response:
+The endpoint returns one queue prediction for each submitted text.
 
-```json
-{
-  "predictions": [
-    "billing",
-    "account_access",
-    "technical_support"
-  ]
-}
+## Example cURL Request
+
+```bash
+curl -X POST \
+  "https://intelligent-support-ticket-router.onrender.com/predict" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"I was charged twice for my monthly subscription."}'
 ```
-
-The exact category names depend on the classes learned by the trained model.
 
 ## Project Structure
 
 ```text
 Intelligent-Support-Ticket-Router-using-NLP/
-│
 ├── app/
 │   ├── __init__.py
 │   ├── main.py
 │   └── preprocessing.py
-│
 ├── frontend/
 │   ├── requirements.txt
 │   └── streamlit_app.py
-│
 ├── model/
 │   └── svm_pipeline.joblib
-│
 ├── notebook/
 │   ├── 01_Description_and_EDA_ENG.ipynb
 │   ├── 02_Preprocessing_and_Baseline.ipynb
-│   └── 03_BERT_FineTuning.ipynb
-│
-├── .python-version
+│   ├── 03_BERT_FineTuning.ipynb
+│   └── 04_Error_Analysis.ipynb
 ├── requirements.txt
 ├── runtime.txt
 └── README.md
 ```
+
+## Notebook Workflow
+
+### `01_Description_and_EDA_ENG.ipynb`
+
+- dataset validation;
+- class distribution analysis;
+- ticket-length analysis;
+- duplicate and missing-value checks;
+- preparation of the cleaned English dataset.
+
+### `02_Preprocessing_and_Baseline.ipynb`
+
+- stratified train-validation-test split;
+- reusable spaCy preprocessing transformer;
+- Logistic Regression baselines;
+- Linear SVM baseline;
+- Macro F1-based model comparison;
+- stratified cross-validation;
+- TF-IDF and SVM hyperparameter search;
+- final classical pipeline export.
+
+### `03_BERT_FineTuning.ipynb`
+
+- BERT tokenization;
+- fine-tuning for 10-class classification;
+- class-weighted training;
+- validation and test evaluation;
+- comparison with the classical baseline.
+
+### `04_Error_Analysis.ipynb`
+
+- class-level error rates;
+- confusion-pair analysis;
+- ticket-length analysis;
+- comparison of SVM and BERT predictions;
+- identification of ambiguous or potentially noisy labels;
+- confidence-based agent-review experiments.
 
 ## Local Setup
 
@@ -184,29 +317,34 @@ Create and activate a virtual environment:
 
 ```bash
 python -m venv .venv
+```
+
+macOS or Linux:
+
+```bash
 source .venv/bin/activate
 ```
 
-For Windows:
+Windows PowerShell:
 
-```bash
-.venv\Scripts\activate
+```powershell
+.venv\Scripts\Activate.ps1
 ```
 
-Install dependencies:
+Install dependencies and the spaCy English model:
 
 ```bash
 pip install -r requirements.txt
 python -m spacy download en_core_web_sm
 ```
 
-Run the FastAPI app locally:
+Run FastAPI locally:
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-Open the local API documentation:
+Open the API documentation:
 
 ```text
 http://127.0.0.1:8000/docs
@@ -214,56 +352,48 @@ http://127.0.0.1:8000/docs
 
 ## Deployment
 
-The API is deployed on Render as a Web Service.
+The API is deployed as a Render Web Service.
 
-Render configuration:
+Build command:
 
 ```bash
-Build Command:
 pip install -r requirements.txt && python -m spacy download en_core_web_sm
 ```
 
+Start command:
+
 ```bash
-Start Command:
 uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-Python version:
+The deployment Python version is defined in `runtime.txt`.
 
-```text
-python-3.11.9
-```
+## Tech Stack
 
-## Example cURL Request
+- Python
+- pandas
+- NumPy
+- scikit-learn
+- spaCy
+- Hugging Face Transformers
+- PyTorch
+- FastAPI
+- Pydantic
+- Uvicorn
+- Streamlit
+- Docker
+- joblib
+- Render
 
-```bash
-curl -X POST "https://intelligent-support-ticket-router.onrender.com/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"text": "I was charged twice for my monthly subscription."}'
-```
+## Future Improvements
 
-## Notes
+- probability calibration for more interpretable confidence scores;
+- class-specific confidence thresholds;
+- agent or LLM review for uncertain predictions;
+- hierarchical routing for semantically overlapping queues;
+- targeted relabeling of ambiguous examples;
+- improved domain-specific preprocessing;
+- monitoring for class drift and prediction drift;
+- automated tests for preprocessing and API contracts.
 
-- The model is loaded once when the FastAPI application starts.
-- The `/predict` endpoint returns one prediction for a single ticket.
-- The `/predict_batch` endpoint returns predictions for multiple tickets.
-- The `score` value is based on the model decision function when available.
-- On the Render Free plan, the first request after inactivity may take longer because the service can go into sleep mode.
-
-## Streamlit Demo
-
-A simple Streamlit frontend is available for testing the deployed FastAPI model.
-
-The user can enter a support ticket, send it to the FastAPI backend, and receive the predicted support category.
-
-Frontend features:
-
-- Text input for custom support tickets
-- Example support ticket templates
-- API health check
-- Predicted category display
-- Raw API response preview
-
-Streamlit Web App:
-
-https://intelligent-support-ticket-router-nlp.streamlit.app
+This repository is a portfolio project demonstrating an end-to-end NLP workflow: data preparation, model experimentation, error analysis, deployment, and production-oriented inference.
