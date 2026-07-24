@@ -179,6 +179,34 @@ if result:
         )
 
     if needs_review and top_classes:
+        with st.expander("How to read the result"):
+    st.markdown(
+        """
+The system compares the ticket with all available support queues and shows the three most suitable options.
+
+### Predicted queue
+
+This is the queue the system considers the best match for the ticket.
+
+### Suggested queues
+
+1. The first queue is the main prediction.
+2. The second and third queues are alternative options.
+3. Similar scores mean that the system is uncertain between several queues.
+
+The scores are internal model values. They are not percentages or probabilities. A negative value does not mean that the result is incorrect.
+
+### Automatic routing
+
+If the first queue is clearly ahead of the second queue, the ticket can be routed automatically.
+
+### Human review required
+
+If the first and second queues have very similar scores, the system asks a person to review the ticket.
+
+The reviewer should read the ticket, compare the suggested queues, select the best queue, add an optional note, and confirm the decision.
+"""
+    )
         st.divider()
         st.subheader("Reviewer decision")
 
